@@ -1,9 +1,10 @@
 version: 2
 
 sources:
-  - name: base_raw
-    schema: base_raw
+  - name: manual
+    database: manual-ae
+    schema: manual
     tables:
+      - name: customers
       - name: acq_orders
       - name: activity
-      - name: customers
