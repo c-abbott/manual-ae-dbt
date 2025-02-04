@@ -1,66 +1,50 @@
--- This query joins cohort data with activity data to track subscription activity over time
-WITH cohort_data AS (
-    SELECT
-        a.customer_id,
-        c.cohort_month,
+WITH subscriptions AS (
+    SELECT 
+        s.customer_id,
+        s.subscription_id,
+        s.subscription_start_date,
+        s.subscription_end_date,
         c.customer_country,
-        c.business_category,
-        DATE_TRUNC(a.subscription_start_date, MONTH) AS activity_month,
-        a.subscription_end_date
-    FROM {{ ref('stg_activity') }} a
-    JOIN {{ ref('customer_cohorts') }} c
-    ON a.customer_id = c.customer_id
+        b.business_category
+    FROM {{ ref('stg_activity') }} s
+    LEFT JOIN {{ ref('stg_customers') }} c ON s.customer_id = c.customer_id
+    LEFT JOIN {{ ref('stg_acq_orders') }} b ON s.customer_id = b.customer_id
 ),
--- Calculates the number of active users for each cohort and month
-cohort_retention AS (
-    SELECT
-        cohort_month,
-        activity_month,
-        customer_country,
-        business_category,
-        COUNT(DISTINCT customer_id) AS total_active_users
-    FROM cohort_data
-    WHERE activity_month >= cohort_month
-    GROUP BY cohort_month, activity_month, customer_country, business_category
+
+cohorts AS (
+    -- Assign each customer to their first-ever subscription start date (cohort)
+    SELECT 
+        customer_id,
+        MIN(subscription_start_date) AS cohort_start_date
+    FROM subscriptions
+    GROUP BY customer_id
 ),
--- Determines the total number of users in each cohort, segmented by country and business category
-cohort_size AS (
-    SELECT
-        cohort_month,
-        customer_country,
-        business_category,
-        COUNT(DISTINCT customer_id) AS cohort_size
-    FROM cohort_data
-    GROUP BY cohort_month, customer_country, business_category
-),
--- Identifies the initial activity month for each customer
-initial_cohort_retention AS (
-    SELECT
-        c.cohort_month,
-        c.customer_country,
-        c.business_category,
-        a.customer_id,
-        MIN(DATE_TRUNC(a.subscription_start_date, MONTH)) OVER (PARTITION BY c.customer_id) AS initial_activity_month
-    FROM {{ ref('stg_activity') }} a
-    JOIN {{ ref('customer_cohorts') }} c
-    ON a.customer_id = c.customer_id
+
+retention AS (
+    SELECT DISTINCT  
+        c.cohort_start_date AS cohort_month,
+        DATE_ADD(c.cohort_start_date, INTERVAL 90 DAY) AS check_retention_date,
+        s.customer_id,
+        s.customer_country,
+        s.business_category,
+        -- Check if the customer is active at the 90-day mark
+        CASE 
+            WHEN EXISTS (
+                SELECT 1 FROM subscriptions sub
+                WHERE sub.customer_id = s.customer_id
+                AND sub.subscription_start_date <= DATE_ADD(c.cohort_start_date, INTERVAL 90 DAY)
+                AND sub.subscription_end_date >= DATE_ADD(c.cohort_start_date, INTERVAL 90 DAY)
+            ) THEN 1 ELSE 0 
+        END AS is_retained
+    FROM cohorts c
+    JOIN subscriptions s ON c.customer_id = s.customer_id
 )
--- Final query to compute retention rates and track cohort activity, segmented by country and business category
+
 SELECT 
-    cr.cohort_month,
-    cr.activity_month,
-    cr.customer_country,
-    cr.business_category,
-    cr.total_active_users,
-    cs.cohort_size,
-    ROUND(100.0 * cr.total_active_users / cs.cohort_size, 2) AS retention_rate,
-    icr.initial_activity_month
-FROM cohort_retention cr
-JOIN cohort_size cs
-ON cr.cohort_month = cs.cohort_month 
-AND cr.customer_country = cs.customer_country 
-AND cr.business_category = cs.business_category
-JOIN initial_cohort_retention icr
-ON cr.cohort_month = icr.cohort_month 
-AND cr.customer_country = icr.customer_country 
-AND cr.business_category = icr.business_category
+    cohort_month,
+    check_retention_date,
+    customer_id,
+    customer_country,
+    business_category,
+    is_retained  -- 1 if retained at the 90-day mark, 0 if not
+FROM retention
